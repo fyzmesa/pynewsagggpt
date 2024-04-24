@@ -1,126 +1,133 @@
-import feedparser
-import time
-import datetime
-from datetime import timedelta
-import uuid
-from gpt4all import GPT4All
+import ccxt
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 
-# copy/paste the model file under C:\Users\%USERNAME%\.cache\gpt4all
+exchange = ccxt.binance({
+    'apiKey': '',
+    'secret': '',
+})
 
-# List of RSS feeds to aggregate
-# Source: https://rss.feedspot.com/cryptocurrency_rss_feeds/
-feeds = [
-    {'name': 'Coindesk', 'url': 'https://www.coindesk.com/arc/outboundfeeds/rss/'},
-    {'name': 'Bitcoin Magazine', 'url': 'https://bitcoinmagazine.com/.rss/full/'},
-    {'name': 'Decrypt', 'url': 'https://decrypt.co/feed'},
-    {'name': 'The Block', 'url': 'https://www.theblockcrypto.com/rss.xml'},
-    {'name': 'Cointelegraph', 'url': 'https://cointelegraph.com/rss'},
-    {'name': 'Bitcoinist', 'url': 'https://bitcoinist.com/feed/'},
-    {'name': 'NewsBTC', 'url': 'https://www.newsbtc.com/feed/'},
-    {'name': 'Cryptopotato', 'url': 'https://cryptopotato.com/feed/'},
-    {'name': '99 Bitcoins', 'url': 'https://99bitcoins.com/feed/'},
-    {'name': 'Bloomberg', 'url': 'https://feeds.bloomberg.com/markets/news.rss'},
-    {'name': 'Investing', 'url': 'https://www.investing.com/rss/news.rss'},
-    {'name': 'Market Watch', 'url': 'https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines'},
-    {'name': 'Financial Time', 'url': 'https://www.ft.com/news-feed?format=rss'}
-    # {'name': 'FEEDNAME', 'url': 'FEEDURL'} /!\ add a comma to the line above
-]
+symbols = ['BTC/USDT',
+           'ETH/USDT',
+           'ADA/USDT',
+           'SOL/USDT',
+           'BNB/USDT',
+           'DOT/USDT',
+           'ATOM/USDT']
 
-# Dictionary to store article IDs and titles
-article_ids = {}
+now = datetime.now()
+today = now.strftime("%Y-%m-%d %H:%M:%S")
+lastmonth = now - timedelta(days=30)
+yesterday = now - timedelta(hours=24)
 
-# Set to store displayed article IDs
-displayed_article_ids = set()
+lastmonth = lastmonth.strftime("%Y-%m-%d %H:%M:%S")
+yesterday = yesterday.strftime("%Y-%m-%d %H:%M:%S")
 
+print('DATE: ', today)
+# print(lastmonth)
+# print(yesterday)
 
-def get_news():
-    """Fetch news from the RSS feeds"""
-    all_news = {}
-    for feed in feeds:
-        news = feedparser.parse(feed['url'])
-        for entry in news.entries:
-            # Generate a unique ID for the article
-            article_id = str(uuid.uuid4())
+start_date = int(pd.to_datetime(lastmonth).timestamp() * 1000)
+end_date = int(pd.to_datetime(today).timestamp() * 1000)
 
-            # Check if the article title already exists
-            if entry.title not in article_ids.values():
-                article_ids[article_id] = entry.title
+for symbol in symbols:
+    bars = exchange.fetch_ohlcv(symbol, timeframe='1d', since=exchange.parse_date(start_date), limit=end_date - start_date)
+    data = pd.DataFrame(bars, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    data['Date'] = pd.to_datetime(data['Date'], unit='ms')
 
-                # Add the article ID to the entry
-                entry['id'] = article_id
-
-                # Append the entry to the feed's list
-                if feed['name'] not in all_news:
-                    all_news[feed['name']] = []
-                all_news[feed['name']].append(entry)
-
-    return all_news
-
-
-def display_news(news):
-    """Display the news titles and links"""
-    for source, entries in news.items():
-        print(f"\n# News from {source}")
-        for item in entries:
-            # Check if the article has already been displayed
-            if item.id not in displayed_article_ids:
-                print(f"{item.title}: {item.link}")
-                displayed_article_ids.add(item.id)
-        print("-----------------------------------------------------------------------------------------------")
-
-def summarize_news(news):
-    """Generate summaries of news headlines using GPT4All"""
-    # Initialize the GPT4All model
-    model = GPT4All("mistral.7b.openhermes-2.5.gguf_v2.q4_k_m.gguf")
+    data['MA_50'] = data['Close'].rolling(window=50).mean()
+    data['MA_200'] = data['Close'].rolling(window=200).mean()
+    delta = data['Close'].diff(1)
+    up, down = delta.copy(), delta.copy()
+    up[up < 0] = 0
+    down[down > 0] = 0
+    roll_up = up.rolling(window=14).mean()
+    roll_down = down.rolling(window=14).mean().abs()
+    RS = roll_up / roll_down
+    data['RSI'] = 100.0 - (100.0 / (1.0 + RS))
+    data['Trend'] = ''
+    data.loc[data['Close'] > data['MA_50'], 'Trend'] = 'Up   /'
+    data.loc[data['Close'] < data['MA_50'], 'Trend'] = 'Down \\'
     
-    summaries = {}
-    for source, entries in news.items():
-        headlines = [item.title for item in entries]
-        prompt = (
-            f"Please summarize the following news headlines from {source}:\n\n"
-            + "\n".join(headlines) + 
-            "\n\nSummary:"
-        )
-        
-        summary = model.generate(prompt)
-        summaries[source] = summary
+    exchange.load_markets()
+    ticker = exchange.fetch_ticker(symbol)
+    current_price = ticker['last']
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['Date'], data['Close'], label='Close')  # Use 'Date' as the x-axis
+    plt.plot(data['Date'], data['MA_50'], label='MA 50')
+    plt.plot(data['Date'], data['MA_200'], label='MA 200')
+    plt.legend(loc='upper left')
+    plt.title(symbol + ' Historical Price')
+    plt.xlabel('Date')
+    plt.ylabel('Price (USD)')
+    plt.show()
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['Date'], data['RSI'], label='RSI')
+    plt.axhline(y=70, color='r', linestyle='--', label='Overbought')
+    plt.axhline(y=30, color='g', linestyle='--', label='Oversold')
+    plt.legend(loc='upper left')
+    plt.title(symbol + ' Relative Strength Index (RSI)')
+    plt.xlabel('Date')
+    plt.ylabel('RSI')
+    plt.show()
+
+    print(f'\nMonthly Trend : {symbol}')
+    print('Current Trend :', data.iloc[-1]['Trend'])
+    print('Next Few Hours:', 'Up   /' if data.iloc[-1]['Close'] > data.iloc[-1]['MA_50'] else 'Down \\')
+    print('Next Few Days :', 'Up   /' if data.iloc[-1]['Close'] > data.iloc[-1]['MA_200'] else 'Down \\')
+    print('Today\'s price :', current_price)
+
+start_date = int(pd.to_datetime(yesterday).timestamp() * 1000)
+end_date = int(pd.to_datetime(today).timestamp() * 1000)
     
-    return summaries
+for symbol in symbols:
+    bars = exchange.fetch_ohlcv(symbol, timeframe='1h', since=exchange.parse_date(start_date), limit=end_date - start_date)
+    data = pd.DataFrame(bars, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    data['Date'] = pd.to_datetime(data['Date'], unit='ms')
 
+    data['MA_50'] = data['Close'].rolling(window=50).mean()
+    data['MA_200'] = data['Close'].rolling(window=200).mean()
+    delta = data['Close'].diff(1)
+    up, down = delta.copy(), delta.copy()
+    up[up < 0] = 0
+    down[down > 0] = 0
+    roll_up = up.rolling(window=14).mean()
+    roll_down = down.rolling(window=14).mean().abs()
+    RS = roll_up / roll_down
+    data['RSI'] = 100.0 - (100.0 / (1.0 + RS))
+    data['Trend'] = ''
+    data.loc[data['Close'] > data['MA_50'], 'Trend'] = 'Up   /'
+    data.loc[data['Close'] < data['MA_50'], 'Trend'] = 'Down \\'
+    
+    exchange.load_markets()
+    ticker = exchange.fetch_ticker(symbol)
+    current_price = ticker['last']
 
-def main():
-    print("Fetching news...\n")
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['Date'], data['Close'], label='Close')  # Use 'Date' as the x-axis
+    plt.plot(data['Date'], data['MA_50'], label='MA 50')
+    plt.plot(data['Date'], data['MA_200'], label='MA 200')
+    plt.legend(loc='upper left')
+    plt.title(symbol + ' Historical Price')
+    plt.xlabel('Date')
+    plt.ylabel('Price (USD)')
+    plt.show()
 
-    update_interval = timedelta(minutes=30)
-    next_update_time = datetime.datetime.now() + update_interval
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['Date'], data['RSI'], label='RSI')
+    plt.axhline(y=70, color='r', linestyle='--', label='Overbought')
+    plt.axhline(y=30, color='g', linestyle='--', label='Oversold')
+    plt.legend(loc='upper left')
+    plt.title(symbol + ' Relative Strength Index (RSI)')
+    plt.xlabel('Date')
+    plt.ylabel('RSI')
+    plt.show()
 
-    # Get news at a regular interval (e.g. every 30 minutes)
-    while True:
-        all_news = get_news()
-
-        now = datetime.datetime.now()
-        formatNow = now.strftime("%Y/%m/%d %H:%M:%S")
-        print(formatNow)
-
-        display_news(all_news)
-        
-        print("\nGenerating summaries...")
-        summaries = summarize_news(all_news)
-        
-        print("\nSummaries:")
-        for source, summary in summaries.items():
-            print(f"{source}:")
-            print(summary)
-            print("-----------------------------------------------------------------------------------------------")
-
-        time_until_next_update = next_update_time - now
-        formatNextNow = next_update_time.strftime("%H:%M:%S")
-        print(f"\nNext update at {formatNextNow}")
-        print(f"\n\n\n###############################################################################################")
-        time.sleep(time_until_next_update.total_seconds())
-
-        next_update_time += update_interval
-
-
-if __name__ == '__main__':
-    main()
+    print(f'\nDaily Trend   : {symbol}')
+    print('Current Trend :', data.iloc[-1]['Trend'])
+    print('Next Few Hours:', 'Up   /' if data.iloc[-1]['Close'] > data.iloc[-1]['MA_50'] else 'Down \\')
+    print('Next Few Days :', 'Up   /' if data.iloc[-1]['Close'] > data.iloc[-1]['MA_200'] else 'Down \\')
+    print('Today\'s price :', current_price)
